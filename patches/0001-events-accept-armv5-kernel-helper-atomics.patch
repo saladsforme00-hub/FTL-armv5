@@ -1,0 +1,21 @@
+diff --git a/src/events.c b/src/events.c
+index 72a7e49..fa0219b 100644
+--- a/src/events.c
++++ b/src/events.c
+@@ -27,7 +27,16 @@ static const char *eventtext(const enum events event);
+ // setting it. RELOAD_GRAVITY is raised from the SIGRTMIN handler, so the type
+ // has to be lock-free for the exchange to be async-signal-safe
+ static _Atomic bool eventqueue[EVENTS_MAX];
++#if defined(__arm__) && defined(__linux__) && defined(__ARM_ARCH) && (__ARM_ARCH < 6)
++// ARMv5 has no LDREX/STREX. GCC lowers C11 atomics to libgcc's __sync_*
++// helpers, which use the kernel's __kuser_cmpxchg. That helper is lock-free
++// and restartable (the kernel fixes up an interrupted sequence before a
++// signal handler runs), so it is async-signal-safe even though the compiler
++// can only promise ATOMIC_BOOL_LOCK_FREE == 1 for a library call.
++static_assert(ATOMIC_BOOL_LOCK_FREE >= 1, "Event queue must be lock-free, it is used from a signal handler");
++#else
+ static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "Event queue must be lock-free, it is used from a signal handler");
++#endif
+ 
+ // Set/Request event
+ // We set the events atomically to ensure no race collisions can happen. If an
