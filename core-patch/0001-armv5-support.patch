@@ -1,0 +1,135 @@
+Subject: [PATCH] Add ARMv5 support (FTL from FTL-armv5 releases)
+
+---
+ advanced/Scripts/update.sh         |  2 +-
+ automated install/basic-install.sh | 60 ++++++++++++++++++++++++++----
+ 2 files changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/advanced/Scripts/update.sh b/advanced/Scripts/update.sh
+index 4e0d973e..e56cb4c6 100755
+--- a/advanced/Scripts/update.sh
++++ b/advanced/Scripts/update.sh
+@@ -12,7 +12,7 @@
+ 
+ # Variables
+ readonly ADMIN_INTERFACE_GIT_URL="https://github.com/pi-hole/web.git"
+-readonly PI_HOLE_GIT_URL="https://github.com/pi-hole/pi-hole.git"
++readonly PI_HOLE_GIT_URL="https://github.com/__FORK_OWNER__/pi-hole.git"
+ readonly PI_HOLE_FILES_DIR="/etc/.pihole"
+ 
+ SKIP_INSTALL=true
+diff --git a/automated install/basic-install.sh b/automated install/basic-install.sh
+index 1c2f8e1e..5aaf12c4 100755
+--- a/automated install/basic-install.sh	
++++ b/automated install/basic-install.sh	
+@@ -81,7 +81,27 @@ webroot="/var/www/html"
+ # Two notable scripts are gravity.sh (used to generate the HOSTS file) and advanced/Scripts/webpage.sh (used to install the Web admin interface)
+ webInterfaceGitUrl="https://github.com/pi-hole/web.git"
+ webInterfaceDir="${webroot}/admin"
+-piholeGitUrl="https://github.com/pi-hole/pi-hole.git"
++# ---- ARMv5 fork ---------------------------------------------------------------
++# GitHub account that hosts this fork of pi-hole/pi-hole and the FTL-armv5
++# builder repo. Core scripts are cloned/updated from the fork; on ARMv5 the FTL
++# binary is downloaded from the builder repo's releases instead of pi-hole/FTL.
++# Every other architecture keeps using the official FTL release.
++PIHOLE_FORK_OWNER="__FORK_OWNER__"
++ftlArmv5Repo="${PIHOLE_FORK_OWNER}/FTL-armv5"
++piholeGitUrl="https://github.com/${PIHOLE_FORK_OWNER}/pi-hole.git"
++# Touch this file to keep a self-built /usr/bin/pihole-FTL: the installer and
++# `pihole -up` will then never replace the binary.
++ftlPinnedFile="/etc/pihole/ftl-pinned"
++
++# Return the GitHub repo whose releases provide the given FTL binary
++ftl_release_repo() {
++    if [[ "${1}" == "pihole-FTL-armv5" ]]; then
++        echo "${ftlArmv5Repo}"
++    else
++        echo "pi-hole/FTL"
++    fi
++}
++# --------------------------------------------------------------------------------
+ PI_HOLE_LOCAL_REPO="/etc/.pihole"
+ # List of pihole scripts, stored in an array
+ PI_HOLE_FILES=(list piholeDebug piholeLogFlush setupLCD update version gravity uninstall webpage)
+@@ -2039,9 +2059,15 @@ FTLinstall() {
+     local binary
+     binary="${1}"
+ 
++    # ARMv5 builds only exist for releases
++    if [[ "${binary}" == "pihole-FTL-armv5" && "${ftlBranch}" != "master" ]]; then
++        printf "  %b FTL branch \"%s\" is not built for ARMv5, using latest release\n" "${INFO}" "${ftlBranch}"
++        ftlBranch="master"
++    fi
++
+     # Determine which version of FTL to download
+     if [[ "${ftlBranch}" == "master" ]]; then
+-        url="https://github.com/pi-hole/ftl/releases/latest/download"
++        url="https://github.com/$(ftl_release_repo "${binary}")/releases/latest/download"
+     else
+         url="https://ftl.pi-hole.net/${ftlBranch}"
+     fi
+@@ -2139,8 +2165,13 @@ get_binary_name() {
+ 
+         # Get the revision from the CPU architecture
+         local rev
+-        rev=$(echo "${cpu_arch}" | grep -o '[0-9]*')
+-        if [[ "${rev}" -eq 6 ]]; then
++        rev=$(echo "${cpu_arch}" | grep -o '[0-9]*' | head -n 1)
++        if [[ "${rev}" -eq 5 ]]; then
++            # ARMv5TE (e.g., Marvell Kirkwood in Pogoplug, SheevaPlug, GoFlex)
++            # Not supported upstream - served from this fork's FTL-armv5 releases
++            printf "%b  %b Detected ARMv5 architecture (%s), using %s builds\n" "${OVER}" "${TICK}" "${cpu_arch}" "${ftlArmv5Repo}"
++            l_binary="pihole-FTL-armv5"
++        elif [[ "${rev}" -eq 6 ]]; then
+             # If ARMv6 is found (e.g., BCM2835 in Raspberry Pi 1 and Zero)
+             printf "%b  %b Detected ARMv6 architecture\\n" "${OVER}" "${TICK}"
+             l_binary="pihole-FTL-armv6"
+@@ -2208,6 +2239,21 @@ FTLcheckUpdate() {
+     local binary
+     binary="${1}"
+ 
++    # Never touch a pinned (self-built) binary
++    if [[ -f "${ftlPinnedFile}" && -n "${ftlLoc}" ]]; then
++        printf "  %b FTL binary is pinned (%s exists), not checking for updates\n" "${INFO}" "${ftlPinnedFile}"
++        return 1
++    fi
++
++    # ARMv5 builds only exist for releases
++    if [[ "${binary}" == "pihole-FTL-armv5" && "${ftlBranch}" != "master" ]]; then
++        printf "  %b FTL branch \"%s\" is not built for ARMv5, using latest release\n" "${INFO}" "${ftlBranch}"
++        ftlBranch="master"
++    fi
++
++    local ftlRepo
++    ftlRepo="$(ftl_release_repo "${binary}")"
++
+     local remoteSha1
+     local localSha1
+ 
+@@ -2254,7 +2300,7 @@ FTLcheckUpdate() {
+ 
+             # Get the latest version from the GitHub API
+             local FTLlatesttag
+-            FTLlatesttag=$(curl -s https://api.github.com/repos/pi-hole/FTL/releases/latest | jq -sRr 'fromjson? | .tag_name | values')
++            FTLlatesttag=$(curl -s "https://api.github.com/repos/${ftlRepo}/releases/latest" | jq -sRr 'fromjson? | .tag_name | values')
+ 
+             if [ -z "${FTLlatesttag}" ]; then
+                 # There was an issue while retrieving the latest version
+@@ -2272,7 +2318,7 @@ FTLcheckUpdate() {
+                 # check the installed sha1sum of the binary vs the remote
+                 # sha1sum. If they do not match, then download
+                 printf "  %b Latest FTL binary already installed (%s), verifying integrity...\\n" "${INFO}" "${FTLlatesttag}"
+-                checkSumFile="https://github.com/pi-hole/FTL/releases/download/${FTLversion%$'\r'}/${binary}.sha1"
++                checkSumFile="https://github.com/${ftlRepo}/releases/download/${FTLversion%$'\r'}/${binary}.sha1"
+                 # Continue further down...
+             fi
+         else
+@@ -2462,7 +2508,7 @@ main() {
+             # when run via curl piping
+             if [[ "$0" == "bash" ]]; then
+                 # Download the install script and run it with admin rights
+-                exec curl -sSL https://install.pi-hole.net | "${SUDO_COMMAND}" bash "$@"
++                exec curl -sSL "https://raw.githubusercontent.com/${PIHOLE_FORK_OWNER}/pi-hole/master/automated%20install/basic-install.sh" | "${SUDO_COMMAND}" bash "$@"
+             else
+                 # when run via calling local bash script
+                 exec "${SUDO_COMMAND}" bash "$0" "$@"
