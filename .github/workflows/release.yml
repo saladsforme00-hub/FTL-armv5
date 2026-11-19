@@ -1,0 +1,127 @@
+name: ARMv5 FTL build + core fork sync
+
+# Every 6 hours:
+#  1. If pi-hole/FTL has a release we haven't built yet, cross-compile it for
+#     ARMv5, test it under an emulated ARM926 CPU, and publish it as a release
+#     of this repo (same tag name as upstream) with pihole-FTL-armv5 + .sha1.
+#  2. Merge the latest pi-hole/pi-hole release into your core fork, keeping the
+#     ARMv5 patch, and tag it. Runs only after step 1 succeeded, so the fork
+#     never offers a core update before the matching FTL binary exists.
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      ftl_tag:
+        description: "Upstream FTL tag to build (empty = latest release)"
+        required: false
+      force:
+        description: "Rebuild even if the release already has a binary"
+        type: boolean
+        default: false
+      init_core:
+        description: "(Re)initialise the core fork: latest upstream release + ARMv5 patch"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: armv5-release
+  cancel-in-progress: false
+
+jobs:
+  ftl:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine upstream release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.ftl_tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          latest="$(gh api repos/pi-hole/FTL/releases/latest --jq .tag_name)"
+          tag="${INPUT_TAG:-$latest}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [[ "$FORCE" != "true" ]] && gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+               --json isDraft,assets --jq 'select(.isDraft|not) | .assets[].name' 2>/dev/null \
+               | grep -qx pihole-FTL-armv5; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "pihole-FTL $tag for ARMv5 is already published."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Building pihole-FTL $tag for ARMv5."
+          fi
+
+      - name: Install toolchain
+        if: steps.check.outputs.build == 'true'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential gcc-arm-linux-gnueabi \
+            binutils-arm-linux-gnueabi cmake m4 xxd file curl git qemu-user dnsutils
+
+      - name: Cache sysroot (musl + static libs)
+        if: steps.check.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            _work/sysroot
+            _work/stamps
+            _work/dl
+          key: armv5-sysroot-${{ runner.os }}-${{ hashFiles('build-armv5.sh') }}
+
+      - name: Fetch upstream FTL ${{ steps.check.outputs.tag }}
+        if: steps.check.outputs.build == 'true'
+        run: git clone --depth 1 --branch "${{ steps.check.outputs.tag }}" https://github.com/pi-hole/FTL.git ftl-src
+
+      - name: Build
+        if: steps.check.outputs.build == 'true'
+        env:
+          GIT_BRANCH: master
+        run: bash build-armv5.sh ftl-src out
+
+      - name: Functional test (emulated ARM926EJ-S)
+        if: steps.check.outputs.build == 'true'
+        run: sudo bash test/functional-test.sh out/pihole-FTL-armv5
+
+      - name: Publish release
+        if: steps.check.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.check.outputs.tag }}
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          notes="Static ARMv5TE (soft-float, musl) build of [pi-hole/FTL ${TAG}](https://github.com/pi-hole/FTL/releases/tag/${TAG}), built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/pihole-FTL-armv5 out/pihole-FTL-armv5.sha1 --clobber
+          else
+            # Upload to a draft first: the installer reads releases/latest, and a
+            # published release without its binary would make updates fail.
+            gh release create "$TAG" out/pihole-FTL-armv5 out/pihole-FTL-armv5.sha1 \
+              --draft --title "pihole-FTL ${TAG} (ARMv5)" --notes "$notes" --target "$GITHUB_SHA"
+          fi
+          latest_flag="--latest=false"; [[ "$TAG" == "$LATEST" ]] && latest_flag="--latest"
+          gh release edit "$TAG" --draft=false "$latest_flag"
+
+  core:
+    needs: ftl
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Merge latest pi-hole/pi-hole release into ${{ github.repository_owner }}/pi-hole
+        env:
+          GH_TOKEN: ${{ secrets.CORE_FORK_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning::CORE_FORK_TOKEN secret not set - skipping core fork sync"; exit 0
+          fi
+          args=()
+          [[ "${{ inputs.init_core }}" == "true" ]] && args+=(--init)
+          bash scripts/sync-core-fork.sh "${{ github.repository_owner }}" "${args[@]}"
