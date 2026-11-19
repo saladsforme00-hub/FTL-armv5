@@ -256,12 +256,32 @@ log "Result"
 file "$OUT/pihole-FTL-armv5"
 attrs="$("${CROSS}readelf" -A "$OUT/pihole-FTL-armv5")"
 echo "$attrs" | grep -E 'Tag_CPU_arch:|Tag_FP_arch|Tag_ABI_VFP' || true
-if ! echo "$attrs" | grep -qE 'Tag_CPU_arch: v5TE?J?$' || echo "$attrs" | grep -q 'Tag_FP_arch'; then
+if ! grep -qE 'Tag_CPU_arch: v5TE?J?$' <<<"$attrs" || grep -q 'Tag_FP_arch' <<<"$attrs"; then
   echo "ERROR: binary is not tagged as plain ARMv5 soft-float" >&2; exit 1
 fi
-if "${CROSS}objdump" -d "$OUT/pihole-FTL-armv5" | grep -qE $'\t(ldrex|strex|dmb|vldr|vmov)'; then
-  echo "WARNING: ARMv6+/VFP instructions found in binary!" >&2; exit 1
+# No ARMv6+/VFP instructions may appear outside code that is only reached after
+# a runtime CPU check. Allowed:
+#   __a_cas_v6/__a_cas_v7/__a_barrier_v6/__a_barrier_v7/__a_gettp_cp15  musl atomics
+#       and TLS access, chosen at
+#       startup from AT_HWCAP/kuser version; ARMv5 uses __kuser_cmpxchg instead
+#   __setjmp/_longjmp/setjmp/longjmp/sigsetjmp  musl: VFP regs saved only if HWCAP_VFP
+#   __gnu_Unwind_{Save,Restore}_VFP*  libgcc unwinder: only for frames that use VFP
+check_insns() { # disassembly file -> prints offending functions
+  awk -v re='^(ldrex|strex|ldaex|stlex|dmb|dsb|isb|clrex|v[a-z]+|f(ld|st)m[a-z]*|fmxr|fmrx|mcr2?|mrc2?)$' '
+    /^[0-9a-f]+ <.*>:$/ { fn=$2; gsub(/[<>:]/,"",fn); next }
+    NF >= 3 && $1 ~ /:$/ {
+      m=$3; sub(/\..*/,"",m)
+      if (m ~ re && fn !~ /^(__a_(cas|barrier)_v[67]|__a_gettp_cp15|__setjmp|_?_?longjmp|setjmp|sigsetjmp|__gnu_Unwind_(Save|Restore)_VFP.*)$/) print fn": "m
+    }' "$1" | sort | uniq -c
+}
+"${CROSS}objdump" -d "$OUT/pihole-FTL-armv5" > "$WORK/disasm.txt"
+bad="$(check_insns "$WORK/disasm.txt")"
+if [[ -n "$bad" ]]; then
+  echo "ERROR: ARMv6+/VFP instructions outside runtime-dispatched code:" >&2
+  echo "$bad" >&2
+  exit 1
 fi
+echo "Instruction check: OK (only runtime-dispatched ARMv6+/VFP paths present)"
 cat "$OUT/pihole-FTL-armv5.sha1"
 
 if [[ -z "${SKIP_QEMU_CHECK:-}" ]] && command -v qemu-arm >/dev/null; then
