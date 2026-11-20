@@ -34,30 +34,6 @@ test/functional-test.sh             DNS/blocking/API/TLS test under qemu-arm
 .github/workflows/release.yml       the automation
 ```
 
-## One-time setup
-
-1. **Fork `pi-hole/pi-hole`** on GitHub. Keep the name `pi-hole`. In the fork, go to
-   *Settings → Actions → General* and select **Disable actions**, so upstream's CI
-   workflows don't run there.
-2. **Create a repo named `FTL-armv5`** under the same account, and push the
-   contents of this folder to it. Actions stay enabled here. This repo doesn't
-   have to be a fork of `pi-hole/FTL`, because the workflow builds upstream's
-   tagged source directly.
-3. **Create a fine-grained personal access token.** Give it access to
-   *only* `saladsforme00-hub/pi-hole`, with the permissions **Contents: Read and write** and
-   **Workflows: Read and write**. Workflows permission is needed because upstream
-   merges can touch `.github/workflows`. In `FTL-armv5`, add it as the repository
-   secret **`CORE_FORK_TOKEN`** (*Settings → Secrets and variables → Actions*).
-4. **Run the workflow once by hand.** Go to *Actions → "ARMv5 FTL build + core fork sync" →
-   Run workflow* and tick **init_core**. The first FTL build takes about 15–25 minutes.
-   After that, the cached sysroot brings it down to a few minutes. When it's done:
-   * `FTL-armv5` has a release, for example `v6.9`, with `pihole-FTL-armv5` and
-     `pihole-FTL-armv5.sha1`.
-   * Your fork's `master` is the latest core release plus one ARMv5 commit, and
-     it's tagged with the upstream version, for example `v6.6`.
-
-From then on, the workflow runs every 6 hours by itself.
-
 ## Installing on the Pogoplug (Alpine)
 
 ```sh
